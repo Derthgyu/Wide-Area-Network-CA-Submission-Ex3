@@ -1,0 +1,214 @@
+#include "ns3/applications-module.h"
+#include "ns3/core-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/netanim-module.h"
+#include "ns3/network-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/csma-module.h"
+#include "ns3/traffic-control-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE("WANSIM_SecurityAttack");
+
+// --- Fonction pour l'analyse des performances (Question 3) ---
+void
+FlowMonitorAnalysis(Ptr<FlowMonitor> flowMonitor, Ptr<Ipv4FlowClassifier> classifier)
+{
+    std::map<FlowId, FlowMonitor::FlowStats> stats = flowMonitor->Get
+    stats();
+
+    std::cout << "\n\n=== RÉSULTATS DE L'ANALYSE D'ATTAQUE (FlowMonitor) ===\n";
+    std::cout << "Le lien WAN est saturé (5 Mbps) par le trafic de l'attaquant.\n";
+
+    for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin(); i != stats.end(); ++i)
+    {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
+        std::string trafficType = "UNKNOWN";
+        uint32_t srcNode = t.sourceAddress.Get();
+
+        // Identifier le trafic légitime (port 9) et le trafic d'attaque (port 10)
+        if (t.destinationPort == 9)
+        {
+            trafficType = (srcNode == Ipv4Address("10.1.1.1").Get()) ? "LEGITIME (n0)" : "DDoS (n3)";
+        }
+        else if (t.destinationPort == 10)
+        {
+            trafficType = "DDoS (n3)";
+        }
+
+        double avgDelay = i->second.delaySum.GetSeconds() / i->second.rxPackets;
+        double packetLoss = (double)i->second.lostPackets / (double)i->second.txPackets * 100.0;
+        double throughput = i->second.rxBytes * 8.0 / (i->second.timeLastRxPacket.GetSeconds() - i->second.timeFirstTxPacket.GetSeconds()) / 1000000.0;
+
+        std::cout << "\n--- Flow " << i->first << " (" << trafficType << ") ---\n";
+        std::cout << "  Src IP: " << t.sourceAddress << ", Dst Port: " << t.destinationPort << "\n";
+        std::cout << "  Packets Transmis: " << i->second.txPackets << "\n";
+        std::cout << "  Paquets Perdus: " << i->second.lostPackets << " (" << std::fixed << std::setprecision(2) << packetLoss << " %)\n";
+        std::cout << "  Débit (Mbps): " << std::fixed << std::setprecision(3) << throughput << "\n";
+        std::cout << "  Latence Moyenne (s): " << std::fixed << std::setprecision(6) << avgDelay << "\n";
+    }
+    std::cout << "=========================================================\n";
+}
+// -----------------------------------------------------------------
+
+int
+main(int argc, char* argv[])
+{
+    // Augmenter la verbosité pour les applications et la surveillance
+    LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
+    LogComponentEnable("OnOffApplication", LOG_LEVEL_INFO);
+
+    // 1. Configuration des Nœuds
+    NodeContainer nodes;
+    nodes.Create(4);
+    Ptr<Node> n0 = nodes.Get(0); // Client Légitime
+    Ptr<Node> n1 = nodes.Get(1); // Router / Défense
+    Ptr<Node> n2 = nodes.Get(2); // Server / Cible
+    Ptr<Node> n3 = nodes.Get(3); // Attaquant DDoS (Question 3)
+
+    // 2. Configuration des liens (CSMA pour LAN, P2P pour WAN)
+    PointToPointHelper p2p;
+    p2p.SetChannelAttribute("Delay", StringValue("2ms"));
+    
+    // Lien WAN (n1 <-> n2) - Débit du goulot d'étranglement (5 Mbps)
+    p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
+    NodeContainer linkWANNodes(n1, n2);
+    NetDeviceContainer linkWANDevices = p2p.Install(linkWANNodes);
+
+    // Lien LAN (n0, n3, n1) - Haut débit pour simuler un accès local
+    CsmaHelper csma;
+    csma.SetChannelAttribute("DataRate", StringValue("100Mbps"));
+    csma.SetChannelAttribute("Delay", StringValue("10us"));
+    NodeContainer linkLANNodes(n0, n3, n1);
+    NetDeviceContainer linkLANDevices = csma.Install(linkLANNodes);
+
+    // Installation de la pile Internet et des adresses IP
+    InternetStackHelper stack;
+    stack.Install(nodes);
+
+    Ipv4AddressHelper address;
+    // Network 1 (LAN) - 10.1.1.0/24 (n0, n3, n1)
+    address.SetBase("10.1.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfacesLAN = address.Assign(linkLANDevices);
+    // n0: 10.1.1.1, n3: 10.1.1.2, n1(LAN): 10.1.1.3
+
+    // Network 2 (WAN) - 10.1.2.0/24 (n1, n2)
+    address.SetBase("10.1.2.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfacesWAN = address.Assign(linkWANDevices);
+    // n1(WAN): 10.1.2.1, n2: 10.1.2.2
+
+    // Configuration du Routage Statique
+    Ptr<Ipv4> ipv4N1 = n1->GetObject<Ipv4>();
+    ipv4N1->SetAttribute("IpForward", BooleanValue(true)); // Forwarding sur le routeur
+
+    Ipv4StaticRoutingHelper staticRoutingHelper;
+    // n0 route vers 10.1.2.0/24 via n1 (10.1.1.3)
+    Ptr<Ipv4StaticRouting> staticRoutingN0 = staticRoutingHelper.GetStaticRouting(n0->GetObject<Ipv4>());
+    staticRoutingN0->AddNetworkRouteTo(Ipv4Address("10.1.2.0"), Ipv4Mask("255.255.255.0"), interfacesLAN.GetAddress(2), 1);
+    // n3 route vers 10.1.2.0/24 via n1 (10.1.1.3)
+    Ptr<Ipv4StaticRouting> staticRoutingN3 = staticRoutingHelper.GetStaticRouting(n3->GetObject<Ipv4>());
+    staticRoutingN3->AddNetworkRouteTo(Ipv4Address("10.1.2.0"), Ipv4Mask("255.255.255.0"), interfacesLAN.GetAddress(2), 1);
+    // n2 route vers 10.1.1.0/24 via n1 (10.1.2.1)
+    Ptr<Ipv4StaticRouting> staticRoutingN2 = staticRoutingHelper.GetStaticRouting(n2->GetObject<Ipv4>());
+    staticRoutingN2->AddNetworkRouteTo(Ipv4Address("10.1.1.0"), Ipv4Mask("255.255.255.0"), interfacesWAN.GetAddress(0), 1);
+
+
+    // 3. Implémentation du Mécanisme de Défense (Question 4a/b)
+    TrafficControlHelper tc;
+    
+    // Pour simuler la défense contre le flood, nous utilisons PfifoFastQueueDisc (QoS-based Rate Limiting/Defense)
+    // Nous priorisons le trafic légitime (DSCP 46) sur le trafic DDoS (DSCP 0).
+    tc.Set
+    RootQueueDisc
+    ("ns3::PfifoFastQueueDisc", 
+     "MaxPackets", StringValue("100"),
+     "Bands", UintegerValue(3)
+    );
+
+    // Installer la discipline de file d'attente sur l'interface de sortie WAN du routeur n1 (10.1.2.1)
+    Ptr<NetDevice> egressDevice = linkWANDevices.Get(0);
+    tc.Install(egressDevice);
+
+
+    // 4. Trafic (Question 3)
+
+    // Serveur Udp sur n2 (Cible)
+    UdpServerHelper udpServerLegit(9); // Port 9 pour trafic légitime (prioritaire)
+    UdpServerHelper udpServerDDoS(10); // Port 10 pour trafic d'attaque (basse priorité)
+
+    ApplicationContainer serverApps = udpServerLegit.Install(n2);
+    serverApps.Add(udpServerDDoS.Install(n2));
+    serverApps.Start(Seconds(1.0));
+    serverApps.Stop(Seconds(11.0));
+
+    // A. Trafic Légitime (n0) - UdpEcho (simulant un trafic prioritaire)
+    UdpEchoClientHelper echoClient(interfaces2.GetAddress(1), 9); // Cible n2, Port 9
+    echoClient.SetAttribute("MaxPackets", UintegerValue(10));
+    echoClient.SetAttribute("Interval", TimeValue(Seconds(1.0)));
+    echoClient.SetAttribute("PacketSize", UintegerValue(1024));
+    
+    // MARQUAGE DSCP: 46 (Expedited Forwarding - Haute Priorité)
+    echoClient.SetAttribute("DsField", UintegerValue(46)); 
+    ApplicationContainer clientLegit = echoClient.Install(n0);
+    clientLegit.Start(Seconds(2.0));
+    clientLegit.Stop(Seconds(11.0));
+
+    // B. Trafic d'Attaque (n3) - UDP Flood (DDoS)
+    // Débit de 100 Mbps pour saturer le lien 5 Mbps (Question 3)
+    Ptr<OnOffHelper> onOffDDoS = CreateObject<OnOffHelper>(
+        "ns3::UdpClient", 
+        AddressValue(InetSocketAddress(interfaces2.GetAddress(1), 10)) // Cible n2, Port 10
+    );
+    onOffDDoS->SetAttribute("OnTime", StringValue("ns3::ConstantRandomVariable[Constant=1]"));
+    onOffDDoS->SetAttribute("OffTime", StringValue("ns3::ConstantRandomVariable[Constant=0]"));
+    onOffDDoS->SetAttribute("PacketSize", UintegerValue(1500));
+    onOffDDoS->SetAttribute("DataRate", DataRateValue(DataRate("50Mbps"))); // 50 Mbps pour 1 attaquant
+    
+    // MARQUAGE DSCP: 0 (Best Effort - Basse Priorité)
+    onOffDDoS->SetAttribute("DsField", UintegerValue(0));
+    ApplicationContainer clientDDoS = onOffDDoS->Install(n3);
+    clientDDoS.Start(Seconds(2.0));
+    clientDDoS.Stop(Seconds(11.0));
+
+
+    // 5. FlowMonitor pour la mesure de l'impact
+    FlowMonitorHelper flowMonitorHelper;
+    Ptr<FlowMonitor> flowMonitor = flowMonitorHelper.InstallAll();
+
+    // 6. Eavesdropping (Écoute Clandestine) - Question 2
+    // Activer le tracing PCAP sur tous les liens.
+    // L'analyse des fichiers .pcap montrerait que les paquets UdpEcho sont en clair.
+    p2p.EnablePcapAll("scratch/wan-security-attack-wan");
+    csma.EnablePcapAll("scratch/wan-security-attack-lan");
+
+    std::cout << "\n=== Vérification Eavesdropping ===\n";
+    std::cout << "Le fichier PCAP 'wan-security-attack-wan-1-1.pcap' contient les paquets non-chiffrés (UDP Echo) du lien WAN.\n";
+    std::cout << "Une analyse (e.g., Wireshark) prouverait qu'un attaquant sniffe le trafic en clair.\n";
+
+    // Configuration NetAnim
+    AnimationInterface anim("scratch/wan-security-attack.xml");
+    anim.UpdateNodeDescription(n0, "Client LEGITIME");
+    anim.UpdateNodeDescription(n1, "Router/DEFENSE");
+    anim.UpdateNodeDescription(n2, "Server/CIBLE");
+    anim.UpdateNodeDescription(n3, "Attaquant DDoS");
+    // 
+
+    // Exécuter la simulation
+    Simulator::Stop(Seconds(12.0));
+    Simulator::Run();
+
+    // Analyse des résultats
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowMonitorHelper.GetClassifier());
+    FlowMonitorAnalysis(flowMonitor, classifier);
+
+    Simulator::Destroy();
+
+    std::cout << "\n=== Simulation de Sécurité Complète ===\n";
+    std::cout << "Vérifiez l'analyse FlowMonitor pour voir comment le trafic LÉGITIME (DSCP 46) est protégé du trafic DDoS (DSCP 0).\n";
+    std::cout << "Ceci simule l'effet d'une ACL/limitation de débit (Question 4a/b).\n";
+
+    return 0;
+}
