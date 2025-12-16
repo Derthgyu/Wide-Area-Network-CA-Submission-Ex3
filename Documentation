@@ -1,0 +1,49 @@
+EXERCISE 3: WAN Security & Attack Simulation
+
+Explanation
+
+This exercise focuses on network security in a WAN environment. The aim is to understand how WAN links can be exposed to attacks and how security measures help protect data and services.
+
+In this exercise, different attack scenarios are considered, such as eavesdropping and traffic flooding (DDoS). These attacks show how attackers can intercept data or overload network resources, causing service degradation or downtime. Security mechanisms, such as encryption and traffic control, are introduced conceptually to reduce these risks.
+
+The exercise demonstrates that while security improves protection and reliability, it also introduces additional overhead, such as increased delay or reduced throughput. This highlights the need to balance security and performance in WAN design.
+
+
+1. IPsec VPN Design
+Interpretation:
+
+NS-3 has no native IPsec → simulate using encrypted tunnel abstraction.
+
+Approximation
+	• Dedicated tunnel link
+	• Increased delay & reduced bandwidth
+
+2. Eavesdropping Attack:
+Simulation:
+
+Enable packet capture on unsecured link.
+
+p2p.EnablePcap("attack", device);
+
+Proof:
+	• Cleartext visible without VPN
+	• Hidden after VPN abstraction
+
+3. DDoS Attack Simulation
+Interpretation
+
+Multiple attackers flood the server.
+
+Code:
+onoff.SetAttribute("PacketSize", UintegerValue(1024));
+onoff.SetAttribute("DataRate", StringValue("50Mbps"));
+
+4. Defense Mechanisms
+	• Rate limiting → queue size limits
+	• ACLs → drop packets from attacker IP
+	• Load balancing → multiple servers
+
+5. Security vs Performance Trade-off
+	• IPsec → + latency, − throughput
+	• DDoS protection → packet drops but higher availability
+
